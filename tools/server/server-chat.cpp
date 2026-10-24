@@ -254,7 +254,13 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                     });
                 }
             } else {
-                throw std::invalid_argument("Cannot determine type of 'item'");
+                const std::string type = json_value(item, "type", std::string());
+                // a known type that reaches here has missing fields, keep it an error
+                if (type.empty() || type == "message" || type == "function_call" ||
+                    type == "function_call_output" || type == "reasoning") {
+                    throw std::invalid_argument("Cannot determine type of 'item'");
+                }
+                SRV_WRN("unsupported Responses input item type '%s' skipped\n", type.c_str());
             }
         }
     } else {

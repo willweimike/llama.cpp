@@ -1,5 +1,6 @@
 #include "testing.h"
 
+#include "../tools/server/server-chat.h"
 #include "../tools/server/server-common.h"
 #include "../tools/server/server-decision.h"
 
@@ -435,6 +436,74 @@ static void test_decision_escape(testing & t) {
     });
 }
 
+//
+// Responses API -> Chat Completions converter
+//
+
+static json responses_convert(const json & input, const json & extra = json::object()) {
+    json body = extra;
+    body["input"] = input;
+    return server_chat_convert_responses_to_chatcmpl(body);
+}
+
+static bool responses_convert_throws(const json & input) {
+    try {
+        responses_convert(input);
+    } catch (const std::invalid_argument &) {
+        return true;
+    }
+    return false;
+}
+
+static void test_responses_convert(testing & t) {
+    const json unknown_item = json::parse(R"({"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[]}]})");
+    const json user_item    = json::parse(R"({"role":"user","content":"hi"})");
+    const json asst_item    = json::parse(R"({"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]})");
+    const json call_item    = json::parse(R"({"type":"function_call","call_id":"c1","name":"f","arguments":"{}"})");
+    const json output_item  = json::parse(R"({"type":"function_call_output","call_id":"c1","output":"done"})");
+
+    t.test("unknown item is skipped", [&](testing & t) {
+        json res = responses_convert(json::array({unknown_item, user_item, unknown_item, unknown_item}));
+        const json & msgs = res.at("messages");
+        t.assert_equal("n messages", (size_t) 1, msgs.size());
+        t.assert_equal("role",       std::string("user"), msgs[0].at("role").get<std::string>());
+        t.assert_equal("text",       std::string("hi"),   msgs[0].at("content")[0].at("text").get<std::string>());
+    });
+
+    t.test("assistant items still merge across a skipped item", [&](testing & t) {
+        json res = responses_convert(json::array({asst_item, unknown_item, call_item}));
+        const json & msgs = res.at("messages");
+        t.assert_equal("n messages", (size_t) 1, msgs.size());
+        t.assert_equal("text",       std::string("ok"), msgs[0].at("content")[0].at("text").get<std::string>());
+        t.assert_equal("tool call",  std::string("c1"), msgs[0].at("tool_calls")[0].at("id").get<std::string>());
+    });
+
+    t.test("unknown item does not change the result", [&](testing & t) {
+        json with    = responses_convert(json::array({unknown_item, user_item, call_item, output_item}));
+        json without = responses_convert(json::array({user_item, call_item, output_item}));
+        t.assert_equal("n messages", (size_t) 3, without.at("messages").size());
+        t.assert_true("same messages", with.at("messages") == without.at("messages"));
+    });
+
+    t.test("tools are not affected", [&](testing & t) {
+        json tools = json::parse(R"([{"type":"function","name":"f","parameters":{"type":"object"}}])");
+        json res = responses_convert(json::array({unknown_item, user_item}), {{"tools", tools}});
+        t.assert_equal("n tools",   (size_t) 1, res.at("tools").size());
+        t.assert_equal("tool name", std::string("f"), res.at("tools")[0].at("function").at("name").get<std::string>());
+    });
+
+    t.test("known type with missing field is rejected", [&](testing & t) {
+        json bad_call = call_item;
+        bad_call.erase("call_id");
+        t.assert_true("function_call without call_id", responses_convert_throws(json::array({user_item, bad_call})));
+    });
+
+    t.test("item without a usable type is rejected", [&](testing & t) {
+        t.assert_true("no type",         responses_convert_throws(json::array({json{{"foo", "bar"}}})));
+        t.assert_true("type not string", responses_convert_throws(json::array({json{{"type", 5}}})));
+    });
+}
+
 int main(int argc, char ** argv) {
     testing t;
 
@@ -454,6 +523,7 @@ int main(int argc, char ** argv) {
     t.test("lora_helpers",  test_lora_helpers);
     t.test("server_pipe",   test_server_pipe);
     t.test("decision_escape", test_decision_escape);
+    t.test("responses_convert", test_responses_convert);
 
     return t.summary();
 }
